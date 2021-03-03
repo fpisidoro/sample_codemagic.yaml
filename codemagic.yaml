@@ -1,0 +1,260 @@
+# CONFIGURATION AND CREDENTIALS
+ioscodes: &applecodesigning
+  CERTIFICATE_PRIVATE_KEY: Encrypted()
+  CM_CERTIFICATE: Encrypted()
+  CM_CERTIFICATE_PASSWORD: Encrypted()
+iosappstore: &applecredentials
+  app_id: myapps.resource.id
+  apple_id: my.developer.appleid.login@icloud.com
+  password: generated.app-specifc.password.Encrypted()
+androidkeys: &androidkeystore
+  FCI_KEYSTORE_PATH: /tmp/keystore.keystore
+  FCI_KEYSTORE: Encrypted()
+  FCI_KEYSTORE_PASSWORD: Encrypted()
+  FCI_KEY_PASSWORD: Encrypted()
+  FCI_KEY_ALIAS: Encrypted()
+googleplaystore: &googlecredentials
+  credentials: Encrypted()
+  track: production
+emailnotify: &emaillist
+  recipients:
+    - email@address.com
+universalartifacts: &universalartifacts
+  - build/**/outputs/**/*.apk
+  - build/**/outputs/**/*.aab
+  - build/**/outputs/**/mapping.txt
+  - build/ios/ipa/*.ipa
+  - /tmp/xcodebuild_logs/*.log
+  - flutter_drive.log
+iosartifacts: &appleartifacts
+  - build/ios/ipa/*.ipa
+  - /tmp/xcodebuild_logs/*.log
+  - flutter_drive.log
+androidartifacts: &androidartifacts
+  - build/**/outputs/**/*.apk
+  - build/**/outputs/**/*.aab
+  - build/**/outputs/**/mapping.txt
+  - flutter_drive.log
+
+
+# SCRIPTS  
+universalscripts: 
+  - &pubgetscript
+    name: Get pub packages
+    script: cd . && flutter packages pub get
+  - &createversionnumber
+    name: create version number
+    script: |
+      set -e
+      set -x
+      cd $FCI_BUILD_DIR
+      MARKETVERSION=$(yq e .version pubspec.yaml | sed "s/000/$(($PROJECT_BUILD_NUMBER))/g")
+iosscripts:
+  - &iosinstallpods
+    name: iOS pod install
+    script: |
+      find . -name "Podfile" -execdir pod install \;
+  - &ioskeychain
+    name: iOS set up keychain
+    script: keychain initialize
+  - &iosprofile
+    name: iOS set up provisioning profiles
+    script: | 
+      PROFILES_HOME="$HOME/Library/MobileDevice/Provisioning Profiles"
+      mkdir -p "$PROFILES_HOME"
+      PROFILE_PATH="$(mktemp "$PROFILES_HOME"/$(uuidgen).mobileprovision)"
+      echo ${CM_PROVISIONING_PROFILE} | base64 --decode > "$PROFILE_PATH"
+      echo "Saved provisioning profile $PROFILE_PATH"
+  - &ioscertificate
+    name: iOS set up signing certificate
+    script: |
+      echo $CM_CERTIFICATE | base64 --decode > /tmp/certificate.p12
+      keychain add-certificates --certificate /tmp/certificate.p12 --certificate-password $CM_CERTIFICATE_PASSWORD
+  - &iossetversion
+    name: iOS set build number
+    script: |
+      set -e
+      set -x
+      cd $FCI_BUILD_DIR
+      MARKETVERSION=$(yq e .version pubspec.yaml | sed "s/000/$(($PROJECT_BUILD_NUMBER))/g")
+      cd $FCI_BUILD_DIR/ios
+      agvtool new-version $(($PROJECT_BUILD_NUMBER))
+      agvtool new-marketing-version $MARKETVERSION
+  - &iosbuild
+    name: iOS build flutter
+    script: |
+      cd . && flutter build ios --release --no-codesign
+  - &iossigned
+    name: iOS build signed
+    script: |
+      xcode-project use-profiles
+      cd . && xcode-project build-ipa --workspace "ios/Runner.xcworkspace" --scheme "Runner" --verbose
+androidscripts:
+  - &androidkeysetup
+    name: Android set up key properties
+    script: |
+      # set up key.properties
+      echo $FCI_KEYSTORE | base64 --decode > $FCI_KEYSTORE_PATH
+      cat >> "$FCI_BUILD_DIR/android/key.properties" <<EOF
+      storePassword=$FCI_KEYSTORE_PASSWORD
+      keyPassword=$FCI_KEY_PASSWORD
+      keyAlias=$FCI_KEY_ALIAS
+      storeFile=/tmp/keystore.keystore
+      EOF
+  - &androidlocalsetup
+    name: Android set up local properties
+    script: |
+      # set up local properties
+      echo "flutter.sdk=$HOME/programs/flutter" > "$FCI_BUILD_DIR/android/local.properties"
+  - &androidbuild
+    name: Android build flutter
+    script: | 
+      set -e
+      set -x
+      cd $FCI_BUILD_DIR
+      MARKETVERSION=$(yq e .version pubspec.yaml | sed "s/000/$(($PROJECT_BUILD_NUMBER))/g")
+      cd . && flutter build appbundle --release --build-name=$MARKETVERSION --build-number=$((PROJECT_BUILD_NUMBER))
+  - &androidsigned
+    name: Android build signed apk
+    script: |
+      # generate signed universal apk with user specified keys
+      android-app-bundle build-universal-apk \
+        --bundle build/**/outputs/**/*.aab \
+        --ks /tmp/keystore.keystore \
+        --ks-pass $FCI_KEYSTORE_PASSWORD \
+        --ks-key-alias $FCI_KEY_ALIAS \
+        --key-pass $FCI_KEY_PASSWORD 
+
+
+# WORKFLOWS
+workflows:
+  ios-to-store:
+    name: iOS to store
+    max_build_duration: 60
+    environment:
+      vars: *applecodesigning
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - *pubgetscript
+      - *iosinstallpods
+      - *ioskeychain
+      - *iosprofile
+      - *ioscertificate
+      - *iossetversion
+      - *iosbuild
+      - *iossigned    
+    artifacts: *appleartifacts
+    publishing:
+      email: *emaillist
+      app_store_connect: *applecredentials
+  ios-to-dev:
+    name: iOS to dev
+    max_build_duration: 60
+    environment:
+      vars: *applecodesigning
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+    scripts: 
+      - *pubgetscript
+      - *iosinstallpods
+      - *ioskeychain
+      - *iosprofile
+      - *ioscertificate
+      - *iossetversion
+      - *iosbuild
+      - *iossigned
+    artifacts: *appleartifacts
+    publishing:
+      email: *emaillist
+  android-to-dev:
+    name: android to dev
+    max_build_duration: 60
+    environment:
+      vars: *androidkeystore
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+    scripts: 
+      - *androidkeysetup
+      - *androidlocalsetup
+      - *pubgetscript
+      - *androidbuild
+      - *androidsigned
+    artifacts: *androidartifacts
+    publishing:
+      email: *emaillist
+  android-to-store:
+    name: android to store
+    max_build_duration: 60
+    environment:
+      vars: *androidkeystore
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - *androidkeysetup
+      - *androidlocalsetup
+      - *pubgetscript
+      - *androidbuild
+      - *androidsigned
+    artifacts: *androidartifacts
+    publishing:
+      email: *emaillist
+      google_play: *googlecredentials
+  universal-to-dev:
+    name: universal to dev
+    max_build_duration: 60
+    environment:
+      vars: 
+        <<: *applecodesigning
+        <<: *androidkeystore
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+    scripts: 
+      - *androidkeysetup
+      - *androidlocalsetup
+      - *pubgetscript
+      - *androidbuild
+      - *androidsigned
+      - *iosinstallpods
+      - *ioskeychain
+      - *iosprofile
+      - *ioscertificate
+      - *iossetversion
+      - *iosbuild
+      - *iossigned
+    artifacts: *universalartifacts
+    publishing:
+      email: *emaillist
+  universal-to-store:
+    name: universal to store
+    max_build_duration: 60
+    environment:
+      vars:
+        <<: *applecodesigning
+        <<: *androidkeystore
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+    scripts: 
+      - *androidkeysetup
+      - *androidlocalsetup
+      - *pubgetscript
+      - *androidbuild
+      - *androidsigned
+      - *iosinstallpods
+      - *ioskeychain
+      - *iosprofile
+      - *ioscertificate
+      - *iossetversion
+      - *iosbuild
+      - *iossigned
+    artifacts: *universalartifacts
+    publishing:
+      email: *emaillist
+      app_store_connect: *applecredentials
+      google_play: *googlecredentials
